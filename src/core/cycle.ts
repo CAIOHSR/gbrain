@@ -517,6 +517,13 @@ export interface CycleOpts {
    */
   sourceId?: string;
   /**
+   * Require every attempted phase to succeed before recording freshness.
+   * When true, a partial report containing any `fail` phase does not write
+   * `last_source_cycle_at` / `last_full_cycle_at`; `warn` phases may still
+   * stamp. Omitted for legacy callers to preserve their existing semantics.
+   */
+  requireSuccessfulPhasesForFreshness?: boolean;
+  /**
    * issue #2860 — one-shot per-invocation bypass of a phase's own
    * `dream.<phase>.enabled` / `cycle.<phase>.enabled` config gate. Wired
    * from `gbrain dream --phase <name> --once`.
@@ -2562,6 +2569,7 @@ export async function runCycle(
   //   - engine is null (no-DB path)
   //   - status is 'failed' or 'skipped' (don't mark a non-run as fresh)
   //   - dryRun (writes are out of scope)
+  //   - requireSuccessfulPhasesForFreshness is set and any phase failed
   //
   // #3504: the write is still best-effort in the sense that it never throws out
   // of runCycle and never aborts the run (the phases already did their work).
@@ -2571,7 +2579,10 @@ export async function runCycle(
   // timestamp post-failure is still higher than missing a successful write, so
   // the stamp itself is unchanged — only the reporting is.
   let stampWriteFailed: { source_id: string; error: string } | undefined;
-  if (opts.sourceId && engine && !dryRun && !aborted && (status === 'ok' || status === 'clean' || status === 'partial')) {
+  const hasFailedPhase = phaseResults.some((phase) => phase.status === 'fail');
+  const freshnessPhaseGate =
+    !opts.requireSuccessfulPhasesForFreshness || !hasFailedPhase;
+  if (opts.sourceId && engine && !dryRun && !aborted && freshnessPhaseGate && (status === 'ok' || status === 'clean' || status === 'partial')) {
     try {
       const nowIso = new Date().toISOString();
       // #2194 fix #3 (the cycle split): `last_source_cycle_at` is the NEW gate

@@ -707,6 +707,7 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
     synthFrom: opts.from ?? undefined,
     synthTo: opts.to ?? undefined,
     synthBypassDreamGuard: opts.bypassDreamGuard,
+    ...(opts.sourceOnly ? { requireSuccessfulPhasesForFreshness: true } : {}),
     // issue #2860: opts.phase is guaranteed non-null here when opts.once is
     // set (parseArgs enforces --once requires --phase).
     onceForPhase: opts.once ? opts.phase! : undefined,

@@ -8,6 +8,8 @@
  *   - engine is non-null (no-DB path skips)
  *   - status is 'ok' | 'clean' | 'partial' (failed/skipped don't mark fresh)
  *   - dryRun is false
+ *   - `requireSuccessfulPhasesForFreshness` additionally rejects `partial`
+ *     reports containing a failed phase, while warnings may still stamp
  *
  * Best-effort in that it never throws out of runCycle. As of #3504 a write
  * failure IS surfaced: it sets `stamp_write_failed` on the report and degrades
@@ -18,7 +20,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { runCycle } from '../src/core/cycle.ts';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -141,6 +143,89 @@ describe('runCycle last_full_cycle_at exit hook', () => {
       expect(report.reason).toBe('cycle_already_running');
       const after = await readLastFullCycleAt('gamma');
       expect(after).toBeNull();
+    });
+  });
+
+  test('source-only partial cycle with a failed phase does NOT mark timestamp', async () => {
+    await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+      await seedSource('alpha');
+      // Keep this deterministic and offline: lint succeeds, while the
+      // extract_facts harness fails before it can scan any pages.
+      const originalGetAllSlugs = engine.getAllSlugs.bind(engine);
+      (engine as unknown as { getAllSlugs: unknown }).getAllSlugs = async () => {
+        throw new Error('controlled extract_facts failure');
+      };
+      try {
+        const report = await runCycle(engine, {
+          brainDir,
+          sourceId: 'alpha',
+          phases: ['lint', 'extract_facts'],
+          requireSuccessfulPhasesForFreshness: true,
+        });
+        expect(report.status).toBe('partial');
+        expect(report.phases.some((phase) => phase.status === 'fail')).toBe(true);
+        expect(await readLastFullCycleAt('alpha')).toBeNull();
+      } finally {
+        (engine as unknown as { getAllSlugs: unknown }).getAllSlugs = originalGetAllSlugs;
+      }
+    });
+  });
+
+  test('source-only partial cycle with warnings still marks timestamp', async () => {
+    await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+      await seedSource('alpha');
+      // Placeholder dates are a deterministic, non-fixable lint warning.
+      writeFileSync(join(brainDir, 'warning.md'), 'YYYY-MM-DD\n');
+      const report = await runCycle(engine, {
+        brainDir,
+        sourceId: 'alpha',
+        phases: ['lint'],
+        requireSuccessfulPhasesForFreshness: true,
+      });
+      expect(report.status).toBe('partial');
+      expect(report.phases.some((phase) => phase.status === 'fail')).toBe(false);
+      expect(report.phases.some((phase) => phase.status === 'warn')).toBe(true);
+      expect(await readLastFullCycleAt('alpha')).not.toBeNull();
+    });
+  });
+
+  test('without the option, a partial cycle with a failed phase keeps legacy stamping', async () => {
+    await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+      await seedSource('alpha');
+      const originalGetAllSlugs = engine.getAllSlugs.bind(engine);
+      (engine as unknown as { getAllSlugs: unknown }).getAllSlugs = async () => {
+        throw new Error('controlled extract_facts failure');
+      };
+      try {
+        const report = await runCycle(engine, {
+          brainDir,
+          sourceId: 'alpha',
+          phases: ['lint', 'extract_facts'],
+        });
+        expect(report.status).toBe('partial');
+        expect(report.phases.some((phase) => phase.status === 'fail')).toBe(true);
+        expect(await readLastFullCycleAt('alpha')).not.toBeNull();
+      } finally {
+        (engine as unknown as { getAllSlugs: unknown }).getAllSlugs = originalGetAllSlugs;
+      }
+    });
+  });
+
+  test('aborted cycle does NOT mark timestamp', async () => {
+    await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+      await seedSource('alpha');
+      const abort = new AbortController();
+      abort.abort(new Error('controlled abort'));
+      const report = await runCycle(engine, {
+        brainDir,
+        sourceId: 'alpha',
+        phases: [],
+        signal: abort.signal,
+        requireSuccessfulPhasesForFreshness: true,
+      });
+      expect(report.status).toBe('partial');
+      expect(report.reason).toBe('aborted');
+      expect(await readLastFullCycleAt('alpha')).toBeNull();
     });
   });
 

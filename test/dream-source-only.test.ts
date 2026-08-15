@@ -142,16 +142,62 @@ describe('gbrain dream --source-only', () => {
       const report = await runCycle(engine, {
         brainDir,
         sourceId: 'vor-brain',
-        phases: NON_GLOBAL_PHASES,
+        // Keep this contract test deterministic and offline. The source-only
+        // phase selection itself is covered above; this stamp timing check
+        // only needs one controlled filesystem phase.
+        phases: ['lint'],
         dryRun: false,
+        requireSuccessfulPhasesForFreshness: true,
         yieldBetweenPhases: async () => {
           observations.push(await lastSourceCycleAt());
         },
       });
-      expect(report.phases.map((phase) => phase.phase)).toEqual(NON_GLOBAL_PHASES);
+      expect(report.phases.map((phase) => phase.phase)).toEqual(['lint']);
+      expect(report.phases.some((phase) => phase.status === 'fail')).toBe(false);
       expect(observations.length).toBeGreaterThan(0);
       expect(observations.every((value) => value === null)).toBe(true);
       expect(await lastSourceCycleAt()).not.toBeNull();
     });
   }, 120_000);
+
+  test('runDream opts into strict freshness only for --source-only', async () => {
+    await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+      const runCycleSpy = spyOn(cycleModule, 'runCycle').mockImplementation(async () => ({
+        schema_version: '1',
+        timestamp: new Date().toISOString(),
+        duration_ms: 0,
+        status: 'clean',
+        brain_dir: brainDir,
+        phases: [],
+        totals: {
+          lint_fixes: 0,
+          backlinks_added: 0,
+          pages_synced: 0,
+          pages_extracted: 0,
+          pages_embedded: 0,
+          orphans_found: 0,
+          transcripts_processed: 0,
+          synth_pages_written: 0,
+          patterns_written: 0,
+          pages_emotional_weight_recomputed: 0,
+          edges_resolved: 0,
+          edges_ambiguous: 0,
+          purged_sources_count: 0,
+          purged_pages_count: 0,
+          facts_consolidated: 0,
+          consolidate_takes_written: 0,
+          phantoms_redirected: 0,
+          phantoms_ambiguous: 0,
+          phantoms_skipped_drift: 0,
+        },
+      }));
+      try {
+        await runDream(engine, ['--source', 'vor-brain', '--dir', brainDir, '--source-only', '--json']);
+        expect(runCycleSpy).toHaveBeenCalledTimes(1);
+        expect(runCycleSpy.mock.calls[0]?.[1].requireSuccessfulPhasesForFreshness).toBe(true);
+      } finally {
+        runCycleSpy.mockRestore();
+      }
+    });
+  });
 });
