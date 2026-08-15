@@ -14,6 +14,7 @@
  *   gbrain dream --dry-run             # preview, no writes
  *   gbrain dream --json                # CycleReport JSON (for agents)
  *   gbrain dream --phase lint          # run a single phase
+ *   gbrain dream --source-only         # source-scoped phases only
  *   gbrain dream --pull                # also git pull the brain repo
  *   gbrain dream --dir /path/to/brain  # explicit brain location
  *
@@ -28,6 +29,7 @@ import {
   runCycle,
   resolveSourceForDir,
   ALL_PHASES,
+  NON_GLOBAL_PHASES,
   type CyclePhase,
   type CycleReport,
 } from '../core/cycle.ts';
@@ -67,6 +69,8 @@ interface DreamArgs {
    * until a follow-up CLI cleanup picks one. Supersedes PR #1559.
    */
   source: string | null;
+  /** v0.45.9: run one atomic cycle containing no brain-global phases. */
+  sourceOnly: boolean;
   /**
    * issue #1678: bounded single-hold backlog drain. `--drain` (currently only
    * for `--phase extract_atoms`) holds the cycle lock once and loops bounded
@@ -126,6 +130,7 @@ function parseArgs(args: string[]): DreamArgs {
   // `phase` value is already non-null by the time that check runs) and
   // --once becomes silently ineffective for both.
   const phaseWasExplicit = phaseIdx !== -1;
+  const wantsHelp = args.includes('--help') || args.includes('-h');
   const rawPhase = phaseIdx !== -1 ? args[phaseIdx + 1] : null;
   let phase = rawPhase && (ALL_PHASES as string[]).includes(rawPhase)
     ? (rawPhase as CyclePhase)
@@ -212,6 +217,11 @@ function parseArgs(args: string[]): DreamArgs {
     process.exit(2);
   }
   const source = uniqSource[0] ?? uniqSourceId[0] ?? null;
+  const sourceOnly = args.includes('--source-only');
+  if (sourceOnly && phaseWasExplicit && !wantsHelp) {
+    console.error('--source-only cannot be combined with --phase; choose one cycle scope');
+    process.exit(2);
+  }
 
   // issue #1678: --drain [--window <seconds>]. Only extract_atoms is drainable
   // this wave (it has a real eligibility predicate; synthesize_concepts does
@@ -252,7 +262,6 @@ function parseArgs(args: string[]): DreamArgs {
   // "--help --source whatever prints help and exits 0" case — `gbrain
   // dream --help --once` (no --phase) must show help, not a usage error.
   const once = args.includes('--once');
-  const wantsHelp = args.includes('--help') || args.includes('-h');
   if (once && !phaseWasExplicit && !wantsHelp) {
     console.error(
       '--once requires an explicit --phase <name> (bypasses that one ' +
@@ -277,6 +286,7 @@ function parseArgs(args: string[]): DreamArgs {
     to,
     bypassDreamGuard: args.includes('--unsafe-bypass-dream-guard'),
     source,
+    sourceOnly,
     drain,
     windowSeconds,
     once,
@@ -386,6 +396,10 @@ Options:
                       when it matches a source's local_path (#1869).
   --source-id <id>    Alias for --source. Matches the v0.37.7.0+
                       naming used by import/extract/graph-query.
+  --source-only       Run one atomic cycle with NON_GLOBAL_PHASES only;
+                      excludes every brain-global phase. Requires an
+                      explicit --source or a --dir that resolves to a
+                      registered source. Cannot be combined with --phase.
 
   --input <file>      Synthesize a specific transcript file (implies
                       --phase synthesize). Bypasses corpus-dir scan.
@@ -654,6 +668,12 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
       if (src?.archived !== true) resolvedSourceId = derived;
     }
   }
+  if (opts.sourceOnly && resolvedSourceId === undefined) {
+    console.error(
+      '--source-only requires an explicit --source or a --dir that resolves to a registered source',
+    );
+    process.exit(2);
+  }
   // ─── issue #1678: bounded single-hold extract_atoms drain ──────────
   if (opts.drain) {
     if (engine === null) {
@@ -663,7 +683,11 @@ export async function runDream(engine: BrainEngine | null, args: string[]): Prom
     return runDrain(engine, opts, resolvedSourceId, brainDir);
   }
 
-  const phases: CyclePhase[] | undefined = opts.phase ? [opts.phase] : undefined;
+  const phases: CyclePhase[] | undefined = opts.phase
+    ? [opts.phase]
+    : opts.sourceOnly
+      ? [...NON_GLOBAL_PHASES]
+      : undefined;
 
   const report = await runCycle(engine, {
     brainDir,
