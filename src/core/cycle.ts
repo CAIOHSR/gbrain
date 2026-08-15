@@ -517,10 +517,11 @@ export interface CycleOpts {
    */
   sourceId?: string;
   /**
-   * Require every attempted phase to succeed before recording freshness.
-   * When true, a partial report containing any `fail` phase does not write
-   * `last_source_cycle_at` / `last_full_cycle_at`; `warn` phases may still
-   * stamp. Omitted for legacy callers to preserve their existing semantics.
+   * Require every selected phase to produce a successful result before recording
+   * freshness. When true, at least one phase result is required and every result
+   * must be `ok` or `warn`; a `fail`, `skipped`, or empty result list does not
+   * write `last_source_cycle_at` / `last_full_cycle_at`. Omitted for legacy
+   * callers to preserve the existing report-status-only semantics.
    */
   requireSuccessfulPhasesForFreshness?: boolean;
   /**
@@ -2569,7 +2570,12 @@ export async function runCycle(
   //   - engine is null (no-DB path)
   //   - status is 'failed' or 'skipped' (don't mark a non-run as fresh)
   //   - dryRun (writes are out of scope)
-  //   - requireSuccessfulPhasesForFreshness is set and any phase failed
+  //   - requireSuccessfulPhasesForFreshness is true and phaseResults is empty,
+  //     contains a `fail`, or contains a `skipped` result (strict source-only)
+  //
+  // When the option is omitted, keep the legacy report-status-only gate exactly
+  // as before: statuses `skipped` and `failed` already do not stamp, while a
+  // `partial` report can still stamp even if one of its phases failed.
   //
   // #3504: the write is still best-effort in the sense that it never throws out
   // of runCycle and never aborts the run (the phases already did their work).
@@ -2579,9 +2585,10 @@ export async function runCycle(
   // timestamp post-failure is still higher than missing a successful write, so
   // the stamp itself is unchanged — only the reporting is.
   let stampWriteFailed: { source_id: string; error: string } | undefined;
-  const hasFailedPhase = phaseResults.some((phase) => phase.status === 'fail');
   const freshnessPhaseGate =
-    !opts.requireSuccessfulPhasesForFreshness || !hasFailedPhase;
+    !opts.requireSuccessfulPhasesForFreshness ||
+    (phaseResults.length > 0 && phaseResults.every((phase) =>
+      phase.status === 'ok' || phase.status === 'warn'));
   if (opts.sourceId && engine && !dryRun && !aborted && freshnessPhaseGate && (status === 'ok' || status === 'clean' || status === 'partial')) {
     try {
       const nowIso = new Date().toISOString();

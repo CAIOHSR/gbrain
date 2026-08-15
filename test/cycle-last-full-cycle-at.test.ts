@@ -8,8 +8,12 @@
  *   - engine is non-null (no-DB path skips)
  *   - status is 'ok' | 'clean' | 'partial' (failed/skipped don't mark fresh)
  *   - dryRun is false
- *   - `requireSuccessfulPhasesForFreshness` additionally rejects `partial`
- *     reports containing a failed phase, while warnings may still stamp
+ *   - `requireSuccessfulPhasesForFreshness` additionally requires at least one
+ *     phase result and rejects any `fail` or `skipped` phase; `warn` phases
+ *     may still stamp. An empty strict result list does not stamp.
+ *   - when the option is omitted, the legacy report-status-only behavior is
+ *     unchanged (the existing `failed`/`skipped` status gate still prevents a
+ *     stamp, while a `partial` report may stamp).
  *
  * Best-effort in that it never throws out of runCycle. As of #3504 a write
  * failure IS surfaced: it sets `stamp_write_failed` on the report and degrades
@@ -52,12 +56,12 @@ beforeEach(async () => {
   gbrainHome = mkdtempSync(join(tmpdir(), 'gbrain-cycle-lfca-home-'));
 });
 
-async function seedSource(id: string): Promise<void> {
+async function seedSource(id: string, localPath: string | null = brainDir): Promise<void> {
   await engine.executeRaw(
     `INSERT INTO sources (id, name, local_path, config, archived, created_at)
      VALUES ($1, $2, $3, '{}'::jsonb, false, NOW())
      ON CONFLICT (id) DO UPDATE SET local_path = EXCLUDED.local_path`,
-    [id, id, brainDir],
+    [id, id, localPath],
   );
 }
 
@@ -143,6 +147,56 @@ describe('runCycle last_full_cycle_at exit hook', () => {
       expect(report.reason).toBe('cycle_already_running');
       const after = await readLastFullCycleAt('gamma');
       expect(after).toBeNull();
+    });
+  });
+
+  test('strict freshness with a source-only skipped phase does NOT mark timestamp', async () => {
+    await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+      // This is the real source-only shape: the registered source has no
+      // local_path, so the filesystem lint phase returns skipped/no_brain_dir.
+      await seedSource('source-only', null);
+      const report = await runCycle(engine, {
+        brainDir: null,
+        sourceId: 'source-only',
+        phases: ['lint'],
+        requireSuccessfulPhasesForFreshness: true,
+      });
+      expect(report.phases).toHaveLength(1);
+      expect(report.phases[0]).toMatchObject({
+        phase: 'lint',
+        status: 'skipped',
+        details: { reason: 'no_brain_dir' },
+      });
+      expect(await readLastFullCycleAt('source-only')).toBeNull();
+    });
+  });
+
+  test('strict freshness with no phase results does NOT mark timestamp', async () => {
+    await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+      await seedSource('empty');
+      const report = await runCycle(engine, {
+        brainDir,
+        sourceId: 'empty',
+        phases: [],
+        requireSuccessfulPhasesForFreshness: true,
+      });
+      expect(report.phases).toHaveLength(0);
+      expect(report.status).toBe('failed');
+      expect(await readLastFullCycleAt('empty')).toBeNull();
+    });
+  });
+
+  test('legacy empty phase selection keeps its existing no-stamp behavior', async () => {
+    await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+      await seedSource('legacy-empty');
+      const report = await runCycle(engine, {
+        brainDir,
+        sourceId: 'legacy-empty',
+        phases: [],
+      });
+      expect(report.phases).toHaveLength(0);
+      expect(report.status).toBe('failed');
+      expect(await readLastFullCycleAt('legacy-empty')).toBeNull();
     });
   });
 
