@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import * as cycleModule from '../src/core/cycle.ts';
 import { NON_GLOBAL_PHASES, GLOBAL_PHASES, runCycle } from '../src/core/cycle.ts';
 import { runDream } from '../src/commands/dream.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
@@ -81,9 +82,56 @@ describe('gbrain dream --source-only', () => {
     });
   });
 
+  describe('--source-only rejects derived single phases', () => {
+    async function expectUsageError(args: string[]) {
+      const exitSpy = spyOn(process, 'exit').mockImplementation(() => { throw new Error('EXIT'); });
+      const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
+      const runCycleSpy = spyOn(cycleModule, 'runCycle').mockImplementation(async () => {
+        throw new Error('runCycle should not be called');
+      });
+      let thrown: unknown;
+      try {
+        await runDream(engine, args);
+      } catch (error) {
+        thrown = error;
+      }
+      try {
+        expect((thrown as Error | undefined)?.message).toBe('EXIT');
+        expect(exitSpy).toHaveBeenCalledWith(2);
+        expect(errorSpy.mock.calls.flat().join(' ')).toMatch(
+          /--source-only cannot be combined with --phase, --input, or --drain/,
+        );
+        expect(runCycleSpy).not.toHaveBeenCalled();
+        expect(await lastSourceCycleAt()).toBeNull();
+      } finally {
+        runCycleSpy.mockRestore();
+        exitSpy.mockRestore();
+        errorSpy.mockRestore();
+      }
+    }
+
+    test('rejects an explicit --phase without calling runCycle', async () => {
+      await expectUsageError([
+        '--source', 'vor-brain', '--dir', brainDir, '--source-only', '--phase', 'lint',
+      ]);
+    });
+
+    test('rejects --input implied synthesize without calling runCycle', async () => {
+      await expectUsageError([
+        '--source', 'vor-brain', '--dir', brainDir, '--source-only', '--input', '/tmp/transcript.txt',
+      ]);
+    });
+
+    test('rejects --drain implied extract_atoms without calling runCycle', async () => {
+      await expectUsageError([
+        '--source', 'vor-brain', '--dir', brainDir, '--source-only', '--drain', '--dry-run',
+      ]);
+    });
+  });
+
   test('--help documents --source-only without connecting the cycle', async () => {
     const logSpy = spyOn(console, 'log').mockImplementation(() => {});
-    await runDream(null, ['--help', '--source-only']);
+    await runDream(null, ['--help', '--source-only', '--input', '/tmp/transcript.txt']);
     expect(logSpy.mock.calls.flat().join(' ')).toContain('--source-only');
     logSpy.mockRestore();
   });

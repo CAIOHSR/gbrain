@@ -218,10 +218,6 @@ function parseArgs(args: string[]): DreamArgs {
   }
   const source = uniqSource[0] ?? uniqSourceId[0] ?? null;
   const sourceOnly = args.includes('--source-only');
-  if (sourceOnly && phaseWasExplicit && !wantsHelp) {
-    console.error('--source-only cannot be combined with --phase; choose one cycle scope');
-    process.exit(2);
-  }
 
   // issue #1678: --drain [--window <seconds>]. Only extract_atoms is drainable
   // this wave (it has a real eligibility predicate; synthesize_concepts does
@@ -243,6 +239,17 @@ function parseArgs(args: string[]): DreamArgs {
       console.error(`--drain currently supports only --phase extract_atoms (got "${phase}")`);
       process.exit(2);
     }
+  }
+
+  // Validate after --input and --drain have both derived their phases, so
+  // --source-only cannot silently narrow into a single phase. Keep --help as
+  // a parse-time short-circuit: it documents the flags without rejecting them.
+  if (sourceOnly && phase !== null && !wantsHelp) {
+    console.error(
+      '--source-only cannot be combined with --phase, --input, or --drain; ' +
+      'choose one cycle scope',
+    );
+    process.exit(2);
   }
 
   // issue #2860: --once requires an EXPLICIT single --phase target (typed
