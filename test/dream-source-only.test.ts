@@ -1,0 +1,203 @@
+/** Focused contract tests for `gbrain dream --source-only`. */
+import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach, spyOn } from 'bun:test';
+import { mkdtempSync, rmSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
+import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import * as cycleModule from '../src/core/cycle.ts';
+import { NON_GLOBAL_PHASES, GLOBAL_PHASES, runCycle } from '../src/core/cycle.ts';
+import { runDream } from '../src/commands/dream.ts';
+import { resetPgliteState } from './helpers/reset-pglite.ts';
+import { withEnv } from './helpers/with-env.ts';
+
+let engine: PGLiteEngine;
+let brainDir: string;
+let gbrainHome: string;
+
+beforeAll(async () => {
+  engine = new PGLiteEngine();
+  await engine.connect({});
+  await engine.initSchema();
+}, 60_000);
+
+afterAll(async () => {
+  await engine.disconnect();
+});
+
+beforeEach(async () => {
+  await resetPgliteState(engine);
+  brainDir = mkdtempSync(join(tmpdir(), 'gbrain-source-only-'));
+  gbrainHome = mkdtempSync(join(tmpdir(), 'gbrain-source-only-home-'));
+  await engine.executeRaw(
+    `INSERT INTO sources (id, name, local_path, config, archived, created_at)
+     VALUES ('vor-brain', 'VOR brain', $1, '{}'::jsonb, false, NOW())`,
+    [brainDir],
+  );
+});
+
+afterEach(() => {
+  rmSync(brainDir, { recursive: true, force: true });
+  rmSync(gbrainHome, { recursive: true, force: true });
+});
+
+async function lastSourceCycleAt(): Promise<string | null> {
+  const rows = await engine.executeRaw<{ config: Record<string, unknown> | null }>(
+    `SELECT config FROM sources WHERE id = 'vor-brain'`,
+  );
+  const value = rows[0]?.config?.last_source_cycle_at;
+  return typeof value === 'string' ? value : null;
+}
+
+describe('gbrain dream --source-only', () => {
+  test('reports every non-global phase and no global phase', async () => {
+    await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+      const report = await runDream(engine, [
+        '--source', 'vor-brain',
+        '--dir', brainDir,
+        '--source-only',
+        '--dry-run',
+        '--json',
+      ]);
+      expect(report).toBeTruthy();
+      const phases = report?.phases.map((phase) => phase.phase) ?? [];
+      expect(phases).toEqual(NON_GLOBAL_PHASES);
+      expect(phases).not.toContain(GLOBAL_PHASES[0]);
+    });
+  }, 120_000);
+
+  test('--source-only combined with --phase is a usage error', async () => {
+    await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+      const exitSpy = spyOn(process, 'exit').mockImplementation(() => { throw new Error('EXIT'); });
+      const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        await runDream(engine, ['--source', 'vor-brain', '--dir', brainDir, '--source-only', '--phase', 'lint']);
+        throw new Error('expected runDream to exit');
+      } catch (error: any) {
+        expect(error.message).toBe('EXIT');
+      }
+      expect(exitSpy).toHaveBeenCalledWith(2);
+      expect(errorSpy.mock.calls.flat().join(' ')).toMatch(/--source-only cannot be combined with --phase/);
+      exitSpy.mockRestore();
+      errorSpy.mockRestore();
+    });
+  });
+
+  describe('--source-only rejects derived single phases', () => {
+    async function expectUsageError(args: string[]) {
+      const exitSpy = spyOn(process, 'exit').mockImplementation(() => { throw new Error('EXIT'); });
+      const errorSpy = spyOn(console, 'error').mockImplementation(() => {});
+      const runCycleSpy = spyOn(cycleModule, 'runCycle').mockImplementation(async () => {
+        throw new Error('runCycle should not be called');
+      });
+      let thrown: unknown;
+      try {
+        await runDream(engine, args);
+      } catch (error) {
+        thrown = error;
+      }
+      try {
+        expect((thrown as Error | undefined)?.message).toBe('EXIT');
+        expect(exitSpy).toHaveBeenCalledWith(2);
+        expect(errorSpy.mock.calls.flat().join(' ')).toMatch(
+          /--source-only cannot be combined with --phase, --input, or --drain/,
+        );
+        expect(runCycleSpy).not.toHaveBeenCalled();
+        expect(await lastSourceCycleAt()).toBeNull();
+      } finally {
+        runCycleSpy.mockRestore();
+        exitSpy.mockRestore();
+        errorSpy.mockRestore();
+      }
+    }
+
+    test('rejects an explicit --phase without calling runCycle', async () => {
+      await expectUsageError([
+        '--source', 'vor-brain', '--dir', brainDir, '--source-only', '--phase', 'lint',
+      ]);
+    });
+
+    test('rejects --input implied synthesize without calling runCycle', async () => {
+      await expectUsageError([
+        '--source', 'vor-brain', '--dir', brainDir, '--source-only', '--input', '/tmp/transcript.txt',
+      ]);
+    });
+
+    test('rejects --drain implied extract_atoms without calling runCycle', async () => {
+      await expectUsageError([
+        '--source', 'vor-brain', '--dir', brainDir, '--source-only', '--drain', '--dry-run',
+      ]);
+    });
+  });
+
+  test('--help documents --source-only without connecting the cycle', async () => {
+    const logSpy = spyOn(console, 'log').mockImplementation(() => {});
+    await runDream(null, ['--help', '--source-only', '--input', '/tmp/transcript.txt']);
+    expect(logSpy.mock.calls.flat().join(' ')).toContain('--source-only');
+    logSpy.mockRestore();
+  });
+
+  test('source freshness is written only after the single cycle completes', async () => {
+    await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+      const observations: Array<string | null> = [];
+      const report = await runCycle(engine, {
+        brainDir,
+        sourceId: 'vor-brain',
+        // Keep this contract test deterministic and offline. The source-only
+        // phase selection itself is covered above; this stamp timing check
+        // only needs one controlled filesystem phase.
+        phases: ['lint'],
+        dryRun: false,
+        requireSuccessfulPhasesForFreshness: true,
+        yieldBetweenPhases: async () => {
+          observations.push(await lastSourceCycleAt());
+        },
+      });
+      expect(report.phases.map((phase) => phase.phase)).toEqual(['lint']);
+      expect(report.phases.some((phase) => phase.status === 'fail')).toBe(false);
+      expect(observations.length).toBeGreaterThan(0);
+      expect(observations.every((value) => value === null)).toBe(true);
+      expect(await lastSourceCycleAt()).not.toBeNull();
+    });
+  }, 120_000);
+
+  test('runDream opts into strict freshness only for --source-only', async () => {
+    await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+      const runCycleSpy = spyOn(cycleModule, 'runCycle').mockImplementation(async () => ({
+        schema_version: '1',
+        timestamp: new Date().toISOString(),
+        duration_ms: 0,
+        status: 'clean',
+        brain_dir: brainDir,
+        phases: [],
+        totals: {
+          lint_fixes: 0,
+          backlinks_added: 0,
+          pages_synced: 0,
+          pages_extracted: 0,
+          pages_embedded: 0,
+          orphans_found: 0,
+          transcripts_processed: 0,
+          synth_pages_written: 0,
+          patterns_written: 0,
+          pages_emotional_weight_recomputed: 0,
+          edges_resolved: 0,
+          edges_ambiguous: 0,
+          purged_sources_count: 0,
+          purged_pages_count: 0,
+          facts_consolidated: 0,
+          consolidate_takes_written: 0,
+          phantoms_redirected: 0,
+          phantoms_ambiguous: 0,
+          phantoms_skipped_drift: 0,
+        },
+      }));
+      try {
+        await runDream(engine, ['--source', 'vor-brain', '--dir', brainDir, '--source-only', '--json']);
+        expect(runCycleSpy).toHaveBeenCalledTimes(1);
+        expect(runCycleSpy.mock.calls[0]?.[1].requireSuccessfulPhasesForFreshness).toBe(true);
+      } finally {
+        runCycleSpy.mockRestore();
+      }
+    });
+  });
+});
