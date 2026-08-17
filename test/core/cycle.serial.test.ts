@@ -570,6 +570,24 @@ describe('runCycle — sourceId resolution (regression #475)', () => {
     expect(syncCalls.at(-1)?.sourceId).toBeUndefined();
   });
 
+  test('explicit sourceId wins when operational brainDir differs from registered source path', async () => {
+    await (sharedEngine as any).db.query(
+      `INSERT INTO sources (id, name, local_path) VALUES ($1, $2, $3)`,
+      ['vor-brain', 'vor-brain', '/canonical/vor-brain'],
+    );
+
+    // The wrapper passes --source vor-brain while syncing an isolated checkout.
+    // The explicit source must own sync provenance; resolving by brainDir would
+    // otherwise omit the id and make performSync fall back to "default".
+    await runCycle(sharedEngine, {
+      brainDir: '/operational/vor-gbrain-sync',
+      sourceId: 'vor-brain',
+      phases: ['sync'],
+    });
+
+    expect(syncCalls.at(-1)?.sourceId).toBe('vor-brain');
+  });
+
   test('sources table missing (very old brain) → catch returns undefined, sync still runs', async () => {
     // CRITICAL: do NOT DROP TABLE on the shared engine. initSchema() only
     // re-runs PENDING migrations; once schema_version is at latest, the

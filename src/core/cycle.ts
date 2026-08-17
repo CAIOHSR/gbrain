@@ -1027,16 +1027,17 @@ async function runPhaseSync(
   dryRun: boolean,
   pull: boolean,
   willRunExtractPhase: boolean,
+  sourceId?: string,
 ): Promise<SyncPhaseResult> {
   try {
     const { performSync } = await import('../commands/sync.ts');
     // Resolve the per-source id so sync reads source-scoped last_commit
     // instead of the global config key. The global key can drift out of
     // git history (force push, GC) causing a full reimport of all files.
-    const sourceId = await resolveSourceForDir(engine, brainDir);
+    const resolvedSourceId = sourceId ?? await resolveSourceForDir(engine, brainDir);
     const result = await performSync(engine, {
       repoPath: brainDir,
-      sourceId,
+      sourceId: resolvedSourceId,
       dryRun,
       noPull: !pull,
       noEmbed: true,                       // embed is a separate phase
@@ -1828,7 +1829,14 @@ export async function runCycle(
       } else {
         progress.start('cycle.sync');
         syncAttempted = true; // sync ran its work; undefined pagesAffected now means failure
-        const { result, duration_ms } = await timePhase(() => runPhaseSync(engine, brainDir, dryRun, pull, phases.includes('extract')));
+        const { result, duration_ms } = await timePhase(() => runPhaseSync(
+          engine,
+          brainDir,
+          dryRun,
+          pull,
+          phases.includes('extract'),
+          cycleSourceId,
+        ));
         result.duration_ms = duration_ms;
         // Capture changed slugs for incremental extract.
         syncPagesAffected = (result as SyncPhaseResult).pagesAffected;
